@@ -1,2 +1,0 @@
-# Novel
-Novel Archive
