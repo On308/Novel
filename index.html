@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Novel Archive</title>
+    <title>Novel Archive Viewer</title>
 
-    <!-- 테마 FOUC 방지: CSS보다 먼저 실행 -->
+    <!-- 테마 FOUC 방지 -->
     <script>
         (function () {
             try {
@@ -16,7 +16,7 @@
         })();
     </script>
 	
-    <!-- 폰트: preconnect + 초기 필수 폰트만 (나머지는 JS가 lazy load) -->
+    <!-- 폰트 -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet"
@@ -28,44 +28,24 @@
 
     <header class="app-header">
 	    <div class="brand">
-            <button class="brand-icon" onclick="app.goToList()">N</button>
+            <button class="brand-icon" onclick="viewer.goToList()">N</button>
             <div id="globalStats" class="global-stats" title="모든 작품의 누적 통계">
-                    <span class="stat-item"><span class="stat-label">누적 글자</span> <strong id="statChars">0</strong></span>
-                    <span class="stat-sep">·</span>
-                    <span class="stat-item"><span class="stat-label">누적 회차</span> <strong id="statChapters">0</strong></span>
+                <span class="stat-item"><span class="stat-label">누적 글자</span> <strong id="statChars">0</strong></span>
+                <span class="stat-sep">·</span>
+                <span class="stat-item"><span class="stat-label">누적 회차</span> <strong id="statChapters">0</strong></span>
             </div>
         </div>
 				
         <div class="header-actions">
-            <button onclick="app.openNewPostModal()" class="btn btn-primary">
-                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
-                </svg>
-                새 게시글
-            </button>
-
-            <button onclick="app.toggleDarkMode()" id="themeToggleBtn" class="btn-icon" title="테마 전환"></button>
-
-            <button onclick="app.downloadJSON()" class="btn btn-soft">JSON 다운</button>
-            <label class="btn btn-soft btn-file-label">
-                JSON 복원
-                <input type="file" accept=".json" onchange="app.restoreJSON(event)" hidden>
-            </label>
-			
-            <button onclick="app.connectFile()" id="connectFileBtn" class="btn btn-success">
-                📁 파일 연결
-            </button>
-            <button onclick="app.saveToFile()" id="saveFileBtn" class="btn btn-purple hidden" title="연결된 파일에 즉시 저장">
-                💾 파일 저장
-            </button>
-
+            <button onclick="viewer.toggleDarkMode()" id="themeToggleBtn" class="btn-icon" title="테마 전환"></button>
+            <button onclick="viewer.reloadJSON()" class="btn btn-soft" title="최신 data.json 새로고침">🔄 데이터 새로고침</button>
         </div>
     </header>
 
     <main class="app-main">
         <div id="toastContainer" class="toast-container"></div>
         <div id="appView" class="app-view">
-            <div class="view-loading">데이터를 불러오는 중입니다...</div>
+            <div class="view-loading">작품 데이터를 불러오는 중입니다...</div>
         </div>
     </main>
 
@@ -76,8 +56,6 @@
             <button onclick="window.scrollTo({top:document.body.scrollHeight})" class="scroll-btn" title="빠르게 맨 아래로">▼</button>
             <button onclick="window.scrollTo({top:document.body.scrollHeight, behavior:'smooth'})" class="scroll-btn" title="부드럽게 맨 아래로">↓</button>
         </div>
-
-        <!-- 실시간 날짜/시간 표시 -->
         <div id="liveClock" class="live-clock">
             <div class="live-clock-date">-</div>
             <div class="live-clock-ampm">-</div>
@@ -85,21 +63,423 @@
         </div>
     </div>
 
-    <div id="modalOverlay" class="modal-overlay hidden">
-        <div id="modalContent" class="modal"></div>
-    </div>
+    <!-- 뷰어 전용 스크립트 -->
+    <script src="js/constants.js"></script>
+    <script src="js/utils.js"></script> <!-- 필요한 경우 유틸 사용 -->
+    <script>
+        /* ============================================================
+           NOVEL ARCHIVE VIEWER ENGINE
+           ============================================================ */
+        class NovelViewerApp {
+            constructor() {
+                this.novels = [];
+                this.currentNovel = null;
+                this.currentView = 'list';
+                this.selectedNovelId = null;
+                this.selectedChapterIndex = 0;
+                this.selectedSettingIndex = 0;
+                this.activeDetailTab = 'chapters';
 
-<script src="js/constants.js"></script>
-<script src="js/utils.js"></script>
-<script src="js/db.js"></script>
-<script src="js/preferences.js"></script>
-<script src="js/file-sync.js"></script>
-<script src="js/modal.js"></script>
-<script src="js/list-view.js"></script>
-<script src="js/detail-view.js"></script>
-<script src="js/chapter-edit.js"></script>
-<script src="js/setting-edit.js"></script>
-<script src="js/app.js"></script>
+                this.currentPage = 1;
+                this.itemsPerPage = 16;
+                this.searchQuery = '';
+                this.selectedTag = '전체';
+                this.selectedStatus = 'all';
+                this.selectedAdult = 'all';
+                this.sortOrder = 'latest';
 
+                this.isDarkMode = false;
+                this.fontSize = 13;
+                this.fontFamily = 'font-nanumgothic';
+                this.lineHeight = '180%';
+                this.contentPadding = 16;
+                this.tagCache = { counts: {}, allTags: [] };
+
+                this.initTheme();
+                this.initEventDelegation();
+                this.loadJSONData();
+                this.initLiveClock();
+            }
+
+            /* ── 외부 data.json 불러오기 (`db/data.json` 또는 루트의 `data.json`) ── */
+            async loadJSONData() {
+                try {
+                    // GitHub Pages 배포 구조에 맞춰 경로 설정 (예: './db/data.json' 혹은 './data.json')
+                    const paths = ['./db/data.json', './data.json'];
+                    let data = null;
+
+                    for (const path of paths) {
+                        try {
+                            const res = await fetch(path + '?t=' + Date.now()); // 캐시 방지
+                            if (res.ok) {
+                                data = await res.json();
+                                break;
+                            }
+                        } catch (e) {}
+                    }
+
+                    if (!data) throw new Error('data.json 파일을 찾을 수 없습니다.');
+
+                    this.novels = data.map(n => ({
+                        ...n,
+                        chapterCount: (n.chapters || []).length,
+                        totalChars: (n.chapters || []).reduce((s, c) => s + ((c.content || '').length), 0),
+                        hasRichSettings: computeHasRichSettings ? computeHasRichSettings(n.settings || []) : false
+                    }));
+
+                    this.rebuildTagCache();
+                    this.render();
+                    this.updateGlobalStats();
+                    this.showToast('데이터를 성공적으로 불러왔습니다.');
+                } catch (err) {
+                    console.error(err);
+                    const view = document.getElementById('appView');
+                    if (view) {
+                        view.innerHTML = `
+                            <div style="text-align:center; padding:5rem; color:var(--text-faint);">
+                                <h3>⚠️ 작품 데이터를 불러오지 못했습니다.</h3>
+                                <p style="margin-top:0.5rem; font-size:0.85rem;">동일 폴더 또는 db 폴더에 <code>data.json</code> 파일이 존재하는지 확인해주세요.</p>
+                                <button onclick="viewer.loadJSONData()" class="btn btn-soft" style="margin-top:1rem;">다시 시도</button>
+                            </div>
+                        `;
+                    }
+                }
+            }
+
+            reloadJSON() {
+                this.loadJSONData();
+            }
+
+            /* 이하 기존 리스트/디테일 렌더링 및 네비게이션 로직 축소 통합 */
+            rebuildTagCache() {
+                const counts = {};
+                for (const n of this.novels) {
+                    if (!n.keyword) continue;
+                    n.keyword.split(',').forEach(t => {
+                        const trimmed = t.trim();
+                        if (trimmed) counts[trimmed] = (counts[trimmed] || 0) + 1;
+                    });
+                }
+                const allTags = Object.keys(counts).sort((a, b) =>
+                    counts[b] !== counts[a] ? counts[b] - counts[a] : a.localeCompare(b, 'ko')
+                );
+                this.tagCache = { counts, allTags };
+            }
+
+            getFilteredNovels() {
+                const q = this.searchQuery;
+                const sel = this.selectedTag;
+                const statusFilter = this.selectedStatus || 'all';
+                const adultFilter = this.selectedAdult || 'all';
+                const filtered = this.novels.filter(n => {
+                    if (q) {
+                        const inTitle = (n.title || '').toLowerCase().includes(q);
+                        const inKeyword = (n.keyword || '').toLowerCase().includes(q);
+                        if (!inTitle && !inKeyword) return false;
+                    }
+                    if (sel !== '전체') {
+                        const tags = (n.keyword || '').split(',').map(t => t.trim());
+                        if (!tags.includes(sel)) return false;
+                    }
+                    if (statusFilter !== 'all' && (n.status || 'ongoing') !== statusFilter) return false;
+                    if (adultFilter === 'adult'  && !n.isAdult) return false;
+                    if (adultFilter === 'normal' &&  n.isAdult) return false;
+                    return true;
+                });
+                const cmp = SORT_COMPARATORS[this.sortOrder];
+                if (cmp) filtered.sort(cmp);
+                return filtered;
+            }
+
+            updateGlobalStats() {
+                const elChars = document.getElementById('statChars');
+                const elChapters = document.getElementById('statChapters');
+                if (!elChars || !elChapters) return;
+
+                let totalChars = 0;
+                let totalChapters = 0;
+                for (const n of this.novels) {
+                    totalChars += n.totalChars || 0;
+                    totalChapters += n.chapterCount || 0;
+                }
+                elChars.textContent = totalChars.toLocaleString();
+                elChapters.textContent = totalChapters.toLocaleString();
+            }
+
+            render() {
+                const view = document.getElementById('appView');
+                if (!view) return;
+                if (this.currentView === 'list') {
+                    view.innerHTML = this.renderListView();
+                } else if (this.currentView === 'detail') {
+                    view.innerHTML = this.renderDetailView();
+                }
+                this.updateGlobalStats();
+            }
+
+            goToList() {
+                this.currentView = 'list';
+                this.selectedNovelId = null;
+                this.currentNovel = null;
+                this.render();
+                window.scrollTo({ top: 0, behavior: 'auto' });
+            }
+
+            goToDetail(novelId) {
+                const novel = this.novels.find(n => n.id === novelId);
+                if (!novel) { this.showToast('작품을 찾을 수 없습니다.', 'error'); return; }
+                this.currentNovel = novel;
+                this.currentView = 'detail';
+                this.selectedNovelId = novelId;
+                this.selectedChapterIndex = 0;
+                this.selectedSettingIndex = 0;
+                this.activeDetailTab = 'chapters';
+                this.render();
+                window.scrollTo({ top: 0, behavior: 'auto' });
+            }
+
+            /* ── 테마 및 시계 초기화 ── */
+            initTheme() {
+                const saved = localStorage.getItem('novel_archive_theme');
+                this.isDarkMode = saved === 'dark';
+                document.documentElement.classList.toggle('dark', this.isDarkMode);
+                this.updateThemeButtonIcon();
+            }
+
+            toggleDarkMode() {
+                this.isDarkMode = !this.isDarkMode;
+                document.documentElement.classList.toggle('dark', this.isDarkMode);
+                localStorage.setItem('novel_archive_theme', this.isDarkMode ? 'dark' : 'light');
+                this.updateThemeButtonIcon();
+            }
+
+            updateThemeButtonIcon() {
+                const btn = document.getElementById('themeToggleBtn');
+                if (btn) btn.innerHTML = this.isDarkMode ? '☀️' : '🌙';
+            }
+
+            initLiveClock() {
+                const update = () => {
+                    const clock = document.getElementById('liveClock');
+                    if (!clock) return;
+                    const now = new Date();
+                    const y = now.getFullYear();
+                    const m = String(now.getMonth() + 1).padStart(2, '0');
+                    const d = String(now.getDate()).padStart(2, '0');
+                    const days = ['일', '월', '화', '수', '목', '금', '토'];
+                    const day = days[now.getDay()];
+                    
+                    let hours = now.getHours();
+                    const ampm = hours >= 12 ? '오후' : '오전';
+                    hours = hours % 12 || 12;
+                    const hh = String(hours).padStart(2, '0');
+                    const mm = String(now.getMinutes()).padStart(2, '0');
+                    const ss = String(now.getSeconds()).padStart(2, '0');
+
+                    clock.querySelector('.live-clock-date').textContent = `${y}.${m}.${d} (${day})`;
+                    clock.querySelector('.live-clock-ampm').textContent = ampm;
+                    clock.querySelector('.live-clock-time').textContent = `${hh}:${mm}:${ss}`;
+                };
+                update();
+                setInterval(update, 1000);
+            }
+
+            showToast(message, type = 'success') {
+                const container = document.getElementById('toastContainer');
+                if (!container) return;
+                const toast = document.createElement('div');
+                toast.className = `toast ${type}`;
+                toast.textContent = message;
+                container.appendChild(toast);
+                setTimeout(() => toast.classList.add('show'), 10);
+                setTimeout(() => {
+                    toast.classList.remove('show');
+                    setTimeout(() => toast.remove(), 200);
+                }, 3000);
+            }
+
+            initEventDelegation() {
+                document.addEventListener('click', (e) => {
+                    const target = e.target.closest('[data-action]');
+                    if (!target) return;
+                    const action = target.dataset.action;
+                    if (action === 'filter-tag') {
+                        this.selectedTag = target.dataset.tag;
+                        this.render();
+                    } else if (action === 'filter-status') {
+                        this.selectedStatus = target.dataset.status;
+                        this.render();
+                    } else if (action === 'filter-adult') {
+                        this.selectedAdult = target.dataset.adult;
+                        this.render();
+                    }
+                });
+            }
+
+            /* ListView 및 DetailView UI 컴포넌트 결합 */
+            renderListView() {
+                const { counts: tagCounts, allTags } = this.tagCache;
+                const filtered = this.getFilteredNovels();
+                return `
+                    <div class="list-view">
+                        <div class="panel list-controls">
+                            <div class="list-controls-left">
+                                <span class="total-count">총 작품수: <strong>${this.novels.length}</strong>개</span>
+                            </div>
+                            <div class="list-controls-right">
+                                <select onchange="viewer.filterByTag(this.value)" class="select" style="width:auto;">
+                                    <option value="전체" ${this.selectedTag === '전체' ? 'selected' : ''}>태그 보기</option>
+                                    ${allTags.map(t => `<option value="${escapeHtml(t)}" ${this.selectedTag === t ? 'selected' : ''}>#${escapeHtml(t)} (${tagCounts[t]})</option>`).join('')}
+                                </select>
+                                <select onchange="viewer.changeSort(this.value)" class="select sort-select" style="width:auto;">
+                                    <option value="latest" ${this.sortOrder === 'latest' ? 'selected' : ''}>최신순</option>
+                                    <option value="title_asc" ${this.sortOrder === 'title_asc' ? 'selected' : ''}>가나다순</option>
+                                    <option value="chars_desc" ${this.sortOrder === 'chars_desc' ? 'selected' : ''}>글자수 많은순</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="panel table-wrap">
+                            <table class="novel-table">
+                                <thead>
+                                    <tr>
+                                        <th style="width:4rem;">No</th>
+                                        <th>제목</th>
+                                        <th>키워드</th>
+                                        <th style="width:5rem;">회차</th>
+                                        <th style="width:7rem; text-align:right;">총 글자수</th>
+                                        <th style="width:3.5rem; text-align:center;">상태</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${filtered.length === 0
+                                        ? `<tr class="empty-row"><td colspan="6">조건에 일치하는 작품이 없습니다.</td></tr>`
+                                        : filtered.map((novel, idx) => this.renderNovelRow(novel, idx + 1)).join('')
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                `;
+            }
+
+            renderNovelRow(novel, index) {
+                const tags = novel.keyword ? novel.keyword.split(',').map(t => t.trim()).filter(Boolean) : [];
+                const statusInfo = getStatusInfo(novel.status || 'ongoing');
+                return `
+                    <tr>
+                        <td class="cell-center id-cell">${index}</td>
+                        <td class="cell-title">
+                            <a href="javascript:void(0)" onclick="viewer.goToDetail(${novel.id})" class="title-link">
+                                <span class="color-dot" style="background-color:${novel.color || '#f8c8dc'};"></span>
+                                ${escapeHtml(novel.title)}
+                                ${novel.isAdult ? '<span class="badge-icon" title="성인 작품">🔞</span>' : ''}
+                            </a>
+                        </td>
+                        <td class="tag-cell">
+                            ${tags.length ? tags.map(t => `<span class="tag-inline" data-action="filter-tag" data-tag="${escapeHtml(t)}">*${escapeHtml(t)}</span>`).join(' ') : '-'}
+                        </td>
+                        <td class="cell-center chapter-count">${novel.chapterCount || 0}화</td>
+                        <td class="cell-right char-count">${(novel.totalChars || 0).toLocaleString()}자</td>
+                        <td class="cell-center status-cell"><span>${statusInfo.emoji}</span></td>
+                    </tr>
+                `;
+            }
+
+            renderDetailView() {
+                const novel = this.currentNovel;
+                if (!novel) return `<div style="text-align:center; padding:5rem;"><button onclick="viewer.goToList()" class="btn btn-soft">목록으로</button></div>`;
+                if (!novel.chapters) novel.chapters = [];
+                if (!novel.settings) novel.settings = [];
+
+                const chapter = novel.chapters[this.selectedChapterIndex] || { title: '내용 없음', content: '' };
+                const setting = novel.settings[this.selectedSettingIndex] || { title: '설정 없음', content: '' };
+                const tags = novel.keyword ? novel.keyword.split(',').map(t => t.trim()).filter(Boolean) : [];
+
+                return `
+                    <div class="detail-view">
+                        <div class="panel detail-header">
+                            <div class="detail-title-wrap">
+                                <span class="color-dot" style="background-color:${novel.color || '#f8c8dc'};"></span>
+                                <h2 class="detail-title">
+                                    ${escapeHtml(novel.title)}
+                                    ${novel.isAdult ? '<span class="badge-icon">🔞</span>' : ''}
+                                </h2>
+                            </div>
+                            <div class="detail-title-row">
+                                <div class="detail-tabs">
+                                    <button onclick="viewer.switchTab('chapters')" class="tab-btn ${this.activeDetailTab === 'chapters' ? 'active' : ''}">본문 보기</button>
+                                    <button onclick="viewer.switchTab('settings')" class="tab-btn ${this.activeDetailTab === 'settings' ? 'active' : ''}">설정 및 메모</button>
+                                </div>
+                                <div class="detail-actions">
+                                    <button onclick="viewer.goToList()" class="btn btn-soft btn-sm">목록으로</button>
+                                </div>
+                            </div>
+                            <div class="keyword-row">
+                                <div class="keyword-list">
+                                    <span class="label">키워드:</span>
+                                    ${tags.map(t => `<span class="keyword-badge">#${escapeHtml(t)}</span>`).join('')}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="detail-grid">
+                            <div class="panel sidebar">
+                                <div class="sidebar-header">
+                                    <h3 class="sidebar-title">${this.activeDetailTab === 'chapters' ? `회차 (${novel.chapters.length})` : `설정 (${novel.settings.length})`}</h3>
+                                </div>
+                                <div class="sidebar-list">
+                                    ${this.activeDetailTab === 'chapters' 
+                                        ? novel.chapters.map((ch, idx) => `
+                                            <button onclick="viewer.selectChapter(${idx})" class="list-item ${idx === this.selectedChapterIndex ? 'active' : ''}">
+                                                <span class="list-item-title">${escapeHtml(ch.title)}</span>
+                                                <span class="list-item-meta">${(ch.content || '').length}자</span>
+                                            </button>`).join('')
+                                        : novel.settings.map((st, idx) => `
+                                            <button onclick="viewer.selectSetting(${idx})" class="list-item ${idx === this.selectedSettingIndex ? 'active' : ''}">
+                                                <span class="list-item-title">${escapeHtml(st.title)}</span>
+                                            </button>`).join('')}
+                                </div>
+                            </div>
+
+                            <div class="panel content-panel">
+                                <h3 class="content-title">${escapeHtml(this.activeDetailTab === 'chapters' ? chapter.title : setting.title)}</h3>
+                                <div class="content-display ${this.fontFamily}" style="font-size:${this.fontSize}pt; line-height:${this.lineHeight}; padding:${this.contentPadding}px;">
+                                    ${this.activeDetailTab === 'chapters' ? escapeHtml(chapter.content) : this.parseMarkdown(setting.content)}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            switchTab(tab) {
+                this.activeDetailTab = tab;
+                this.render();
+            }
+
+            selectChapter(idx) {
+                this.selectedChapterIndex = idx;
+                this.render();
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            }
+
+            selectSetting(idx) {
+                this.selectedSettingIndex = idx;
+                this.render();
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            }
+
+            filterByTag(tag) { this.selectedTag = tag; this.render(); }
+            changeSort(order) { this.sortOrder = order; this.render(); }
+
+            parseMarkdown(text) {
+                if (!text) return '';
+                return escapeHtml(text).replace(/\n/g, '<br>');
+            }
+        }
+
+        const viewer = new NovelViewerApp();
+    </script>
 </body>
 </html>
